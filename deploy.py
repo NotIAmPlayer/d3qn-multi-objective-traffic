@@ -107,7 +107,8 @@ class DeployAgent:
         with torch.no_grad():
             q = self.model(s)
             print("Q Values:", q.numpy())
-            return q.argmax().item()
+        
+        return q.argmax().item()
 
 
 # ==========================================================
@@ -160,10 +161,10 @@ class DeployEnv:
     # ── Start ──────────────────────────────────────────────────────────────────
     def start(self):
         traci.start([SUMO_BINARY, "-c", SUMO_CFG])
-        print("Loaded :", traci.simulation.getLoadedNumber())
-        print("Departed:", traci.simulation.getDepartedNumber())
-        print("Vehicle :", traci.vehicle.getIDCount())
-        print("Expected:", traci.simulation.getMinExpectedNumber())
+        # print("Loaded :", traci.simulation.getLoadedNumber())
+        # print("Departed:", traci.simulation.getDepartedNumber())
+        # print("Vehicle :", traci.vehicle.getIDCount())
+        # print("Expected:", traci.simulation.getMinExpectedNumber())
 
         self.CONTROLLED_LANES = list(dict.fromkeys(
             traci.trafficlight.getControlledLanes(TL_ID)
@@ -172,15 +173,15 @@ class DeployEnv:
         for _ in range(100):          # warmup
             traci.simulationStep()
         
-        print("Vehicle Count:", traci.vehicle.getIDCount())
+        # print("Vehicle Count:", traci.vehicle.getIDCount())
 
-        print("Lane Vehicles:")
-        for lane in self.CONTROLLED_LANES:
-            print(
-                lane,
-                traci.lane.getLastStepVehicleNumber(lane),
-                traci.lane.getLastStepHaltingNumber(lane)
-            )
+        # print("Lane Vehicles:")
+        # for lane in self.CONTROLLED_LANES:
+        #     print(
+        #         lane,
+        #         traci.lane.getLastStepVehicleNumber(lane),
+        #         traci.lane.getLastStepHaltingNumber(lane)
+        #     )
 
         raw_state = self._get_state()
         return raw_state
@@ -201,13 +202,17 @@ class DeployEnv:
         current_time  = traci.simulation.getTime()
         step_throughput = 0
         step_delay      = 0.0
+        travel_time     = 0
+        vehicle_count   = 0
         for v in traci.simulation.getArrivedIDList():
             if v in self._vehicle_enter_time:
                 tt = current_time - self._vehicle_enter_time.pop(v)
+                travel_time     += tt
+                vehicle_count   += 1
                 step_throughput += 1
                 step_delay      += max(tt - self.FREE_FLOW_TIME, 0.0)
 
-        raw_state = self._get_state()
+        state = self._get_state()
         # state = state_rms.normalize(raw_state)
 
         reward, reward_components = self._get_reward(step_throughput, step_delay)
@@ -218,6 +223,8 @@ class DeployEnv:
             'waiting_time':  self._get_waiting_time(),
             'throughput':    step_throughput,
             'delay':         step_delay,
+            'travel_time':   travel_time,
+            'vehicle_count': vehicle_count,
             'reward':        reward_components,
             'current_phase': self.current_phase
         }
@@ -282,11 +289,11 @@ class DeployEnv:
         return reward, components
 
     def _apply_action(self, action):
-        print("="*30)
-        print("Action :", action)
-        print("Current:", self.current_phase)
-        print("Target :", ACTION_TO_PHASE[action])
-        print("SUMO phase:", traci.trafficlight.getPhase(TL_ID))
+        # print("="*30)
+        # print("Action :", action)
+        # print("Current:", self.current_phase)
+        # print("Target :", ACTION_TO_PHASE[action])
+        # print("SUMO phase:", traci.trafficlight.getPhase(TL_ID))
 
         target_phase = ACTION_TO_PHASE[action]
         
@@ -297,51 +304,91 @@ class DeployEnv:
                 traci.simulationStep()
         
         self.current_phase = target_phase
-        traci.trafficlight.setPhase(TL_ID, target_phase)
+        traci.trafficlight.setPhase(TL_ID, self.current_phase)
 
-        print("After apply:", traci.trafficlight.getPhase(TL_ID))
+        # print("After apply:", traci.trafficlight.getPhase(TL_ID))
 
     def close(self):
-        traci.close()
+        try:
+            traci.close()
+        except:
+            pass
 
 
 # ==========================================================
 # MAIN
 # ==========================================================
-
-agent=DeployAgent(MODEL_PATH)
-
-env = DeployEnv()
-state = env.start()
-
 episode_reward      = 0
 total_queue         = 0
 total_wait          = 0
 total_throughput    = 0
+total_travel_time   = 0
+total_vehicles      = 0
+total_delay         = 0
 decision_count      = 0
 
-while traci.simulation.getMinExpectedNumber() > 0:
-    print("Raw State:", state)
-    print("Vehicle Count:", traci.vehicle.getIDCount())
-    action = agent.predict(state)
+def main():
+    global episode_reward, total_queue, total_wait, total_throughput, decision_count
+    agent=DeployAgent(MODEL_PATH)
 
-    state, reward, done, info = env.step(action)
+    env = DeployEnv()
+    state = env.start()
 
-    episode_reward += reward
+    while traci.simulation.getMinExpectedNumber() > 0:
+        print("Raw State:", state)
+        print("Vehicle Count:", traci.vehicle.getIDCount())
+        action = agent.predict(state)
 
-    total_queue += info['queue']
-    total_wait += info['waiting_time']
-    total_throughput += info['throughput']
+        state, reward, done, info = env.step(action)
 
-    decision_count += 1
+        episode_reward += reward
 
-traci.close()
+        total_queue += info['queue']
+        total_wait += info['waiting_time']
+        total_throughput += info['throughput']
+        total_travel_time += info['travel_time']
+        total_vehicles += info['vehicle_count']
+        total_delay += info['delay']
 
-print("="*50)
-print("DEPLOYMENT FINISHED")
-print("="*50)
+        decision_count += 1
 
-print(f"Average Queue       : {total_queue/decision_count:.2f}")
-print(f"Average Waiting     : {total_wait/decision_count:.2f}")
-print(f"Total Throughput    : {total_throughput}")
-print(f"Decisions           : {decision_count}")
+        if done:
+            break
+
+if __name__ == "__main__":
+    try:
+        main()
+    except traci.exceptions.FatalTraCIError:
+        print("\nSUMO Connection closed.")
+        print("Kemungkinan sumo-gui ditutup oleh user.")
+    except traci.exceptions.TraCIException as e:
+        print("\nTraCI Error:")
+        print(e)
+    except KeyboardInterrupt:
+        print("\nProgram dihentikan user.")
+    except Exception as e:
+        print("\nUnexpected Error:")
+        print(e)
+    finally:
+        try:
+            traci.close()
+        except:
+            pass
+        
+        print("="*50)
+        print("DEPLOYMENT FINISHED")
+        print("="*50)
+
+        if decision_count > 0:
+            avg_queue = total_queue/decision_count if decision_count > 0 else 0
+            avg_wait = total_wait/decision_count if decision_count > 0 else 0
+            avg_travel = total_travel_time/total_vehicles if total_vehicles > 0 else 0
+            avg_delay = total_delay/total_vehicles if total_vehicles > 0 else 0
+
+            print(f"Reward              : {episode_reward:.2f}")
+            print(f"Average Queue       : {avg_queue:.2f}")
+            print(f"Average Waiting     : {avg_wait:.2f}")
+            print(f"Average Travel Time : {avg_travel:.2f}")
+            print(f"Average Delay       : {avg_delay:.2f}")
+            print(f"Total Throughput    : {total_throughput}")
+            print(f"Decisions           : {decision_count}")
