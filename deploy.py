@@ -328,7 +328,8 @@ total_delay         = 0
 decision_count      = 0
 
 def main():
-    global episode_reward, total_queue, total_wait, total_throughput, decision_count
+    global episode_reward, total_queue, total_wait, total_throughput, decision_count, total_travel_time, total_vehicles, total_delay
+    
     agent=DeployAgent(MODEL_PATH)
 
     env = DeployEnv()
